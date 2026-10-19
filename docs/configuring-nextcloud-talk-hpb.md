@@ -39,10 +39,10 @@ the `community.docker` collection.
 
 ## Container images
 
-The role consumes three images built and published by this repository. GHCR packages
-are private unless you make them public, and the role pulls anonymously: either make
-all three packages public, or authenticate the target Docker daemon with a token that
-has `read:packages`.
+The role consumes three images built and published by this repository. The published
+packages are public, so the default pulls need no registry login. If you mirror them to
+private packages, authenticate the target Docker daemon with a token that has
+`read:packages`.
 
 | Service | Default image | Pinned version |
 | --- | --- | --- |
@@ -255,9 +255,10 @@ removes `nextcloud_talk_hpb_base_path`. The external proxy network is untouched.
 
 ## Troubleshooting
 
-**An image cannot be pulled from GHCR.** The tag is not published yet, the packages are
-private, or the package is not visible to the host. Make all three packages public, or
-authenticate the target Docker daemon with a token that has `read:packages`:
+**An image cannot be pulled from GHCR.** The tag is not published yet, or the package is
+not visible to the host. The published packages are public, so default pulls need no
+login. If you use private mirrors, authenticate the target Docker daemon with a token
+that has `read:packages`:
 
 ```sh
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
