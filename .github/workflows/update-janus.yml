@@ -67,7 +67,7 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           ansible-galaxy role install -r molecule/default/requirements.yml
-          ansible-galaxy collection install community.docker
+          ansible-galaxy collection install community.docker ansible.posix
 
       - name: Run the role smoke test
         if: steps.check.outputs.changed == 'true'

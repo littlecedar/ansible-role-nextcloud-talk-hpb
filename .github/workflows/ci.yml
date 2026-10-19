@@ -33,7 +33,7 @@ jobs:
         run: pip install ansible-core ansible-lint yamllint
 
       - name: Install the collections the role uses
-        run: ansible-galaxy collection install community.docker
+        run: ansible-galaxy collection install community.docker ansible.posix
 
       - name: Lint YAML
         run: yamllint .
@@ -98,7 +98,7 @@ jobs:
       - name: Install the Ansible role and collection dependencies
         run: |
           ansible-galaxy role install -r molecule/default/requirements.yml
-          ansible-galaxy collection install community.docker
+          ansible-galaxy collection install community.docker ansible.posix
 
       - name: Run the role smoke test
         run: molecule test

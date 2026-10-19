@@ -232,7 +232,7 @@ yamllint .
 ansible-lint
 shellcheck scripts/*.sh build/janus/docker-entrypoint.sh
 ansible-galaxy role install -r molecule/default/requirements.yml   # once
-ansible-galaxy collection install community.docker                # once
+ansible-galaxy collection install community.docker ansible.posix  # once
 molecule test          # nested Docker inside a privileged VM-like container
 ```
 
