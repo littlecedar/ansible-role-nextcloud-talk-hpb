@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Install Nextcloud Talk High-Performance Backend (HPB)
+  tags:
+    - setup-all
+    - setup-nextcloud-talk-hpb
+    - install-all
+    - install-nextcloud-talk-hpb
+  when: nextcloud_talk_hpb_enabled | bool
+  block:
+    - name: Validate the Nextcloud Talk HPB configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+
+    - name: Install Nextcloud Talk HPB
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Uninstall Nextcloud Talk HPB
+  tags:
+    - setup-all
+    - setup-nextcloud-talk-hpb
+  when: not (nextcloud_talk_hpb_enabled | bool)
+  block:
+    - name: Uninstall Nextcloud Talk HPB
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"

@@ -1,0 +1,18 @@
+{#
+SPDX-FileCopyrightText: 2026 Travis Wichert
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+{% if nextcloud_talk_hpb_signaling_container_labels_traefik_enabled | bool %}
+traefik.enable=true
+traefik.docker.network={{ nextcloud_talk_hpb_signaling_container_labels_traefik_docker_network }}
+traefik.http.routers.{{ nextcloud_talk_hpb_identifier }}.rule=Host(`{{ nextcloud_talk_hpb_signaling_container_labels_traefik_hostname }}`)
+traefik.http.routers.{{ nextcloud_talk_hpb_identifier }}.entrypoints={{ nextcloud_talk_hpb_signaling_container_labels_traefik_entrypoints }}
+traefik.http.routers.{{ nextcloud_talk_hpb_identifier }}.tls=true
+traefik.http.routers.{{ nextcloud_talk_hpb_identifier }}.tls.certResolver={{ nextcloud_talk_hpb_signaling_container_labels_traefik_tls_certResolver }}
+traefik.http.services.{{ nextcloud_talk_hpb_identifier }}.loadbalancer.server.port={{ nextcloud_talk_hpb_signaling_container_http_port }}
+{% endif %}
+{% for label in nextcloud_talk_hpb_signaling_container_labels_additional_labels_custom %}
+{{ label }}
+{% endfor %}

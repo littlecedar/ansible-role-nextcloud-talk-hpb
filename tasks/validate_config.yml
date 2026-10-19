@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Validate that all required Nextcloud Talk HPB variables are set
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_identifier | string | length > 0
+      - nextcloud_talk_hpb_base_path | string | length > 0
+      - nextcloud_talk_hpb_uid | string | length > 0
+      - nextcloud_talk_hpb_gid | string | length > 0
+      - nextcloud_talk_hpb_hostname | string | length > 0
+      - nextcloud_talk_hpb_public_ip | string | length > 0
+      - nextcloud_talk_hpb_nextcloud_url | string | length > 0
+      - nextcloud_talk_hpb_signaling_secret | string | length > 0
+      - nextcloud_talk_hpb_turn_static_auth_secret | string | length > 0
+      - nextcloud_talk_hpb_signaling_hash_key | string | length > 0
+      - nextcloud_talk_hpb_signaling_block_key | string | length > 0
+      - nextcloud_talk_hpb_signaling_internal_shared_secret_key | string | length > 0
+      - nextcloud_talk_hpb_nats_token | string | length > 0
+      - nextcloud_talk_hpb_proxy_network | string | length > 0
+      - nextcloud_talk_hpb_signaling_container_image | string | length > 0
+      - nextcloud_talk_hpb_janus_container_image | string | length > 0
+      - nextcloud_talk_hpb_nats_container_image | string | length > 0
+    fail_msg: >-
+      Nextcloud Talk HPB is enabled, but one of the required variables is empty.
+      See the role documentation for the list of required variables.
+
+# Signaling 2.1.1 only warns about the hash key (any length starts; 32 or 64 avoids the
+# warning), but refuses to start unless the block key is 16, 24 or 32 bytes.
+- name: Validate the signaling block key length
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_signaling_block_key | string | length in [16, 24, 32]
+    fail_msg: >-
+      nextcloud_talk_hpb_signaling_block_key must be 16, 24 or 32 bytes;
+      the signaling server refuses to start otherwise.
+
+- name: Warn when the signaling hash key is not 32 or 64 bytes
+  when: nextcloud_talk_hpb_signaling_hash_key | string | length not in [32, 64]
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: nextcloud_talk_hpb_signaling_hash_key is
+      {{ nextcloud_talk_hpb_signaling_hash_key | string | length }} bytes; the signaling
+      server recommends 32 or 64 bytes for the session checksum key.
+
+- name: Validate that the public IP address parses as an IP address
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_public_ip | nextcloud_talk_hpb_ip_address
+    fail_msg: "nextcloud_talk_hpb_public_ip is not a valid IPv4/IPv6 address: {{ nextcloud_talk_hpb_public_ip }}"
+
+- name: Validate that the Nextcloud URL looks like an HTTP(S) URL
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_nextcloud_url is match('^https?://')
+    fail_msg: "nextcloud_talk_hpb_nextcloud_url must start with http:// or https://: {{ nextcloud_talk_hpb_nextcloud_url }}"
+
+- name: Validate that the internal HPB network subnet is a CIDR network
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_hpb_subnet | nextcloud_talk_hpb_ip_network
+    fail_msg: "nextcloud_talk_hpb_hpb_subnet is not a valid CIDR network: {{ nextcloud_talk_hpb_hpb_subnet }}"
+
+- name: Validate that the NATS container IP address is inside the internal HPB network
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_hpb_subnet | nextcloud_talk_hpb_network_contains(nextcloud_talk_hpb_nats_container_ip)
+    fail_msg: >-
+      nextcloud_talk_hpb_nats_container_ip ({{ nextcloud_talk_hpb_nats_container_ip }})
+      is not inside nextcloud_talk_hpb_hpb_subnet ({{ nextcloud_talk_hpb_hpb_subnet }})
+
+- name: Validate that the egress network subnet is a CIDR network
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_egress_subnet | nextcloud_talk_hpb_ip_network
+    fail_msg: "nextcloud_talk_hpb_egress_subnet is not a valid CIDR network: {{ nextcloud_talk_hpb_egress_subnet }}"
+
+- name: Validate that the egress gateway address is inside the egress network
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_egress_subnet | nextcloud_talk_hpb_network_contains(nextcloud_talk_hpb_egress_gateway)
+    fail_msg: >-
+      nextcloud_talk_hpb_egress_gateway ({{ nextcloud_talk_hpb_egress_gateway }})
+      is not inside nextcloud_talk_hpb_egress_subnet ({{ nextcloud_talk_hpb_egress_subnet }})
+
+- name: Validate that the Janus RTP port range is formatted as <start>-<end>
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_janus_rtp_port_range is match('^[0-9]+-[0-9]+$')
+    fail_msg: "nextcloud_talk_hpb_janus_rtp_port_range must look like 20000-40000: {{ nextcloud_talk_hpb_janus_rtp_port_range }}"
+
+- name: Validate that the Janus RTP port range is ordered
+  ansible.builtin.assert:
+    that:
+      - (nextcloud_talk_hpb_janus_rtp_port_range.split('-')[0] | int) < (nextcloud_talk_hpb_janus_rtp_port_range.split('-')[1] | int)
+    fail_msg: "nextcloud_talk_hpb_janus_rtp_port_range must end above where it starts: {{ nextcloud_talk_hpb_janus_rtp_port_range }}"
+
+- name: Validate that Traefik label values are set when Traefik labels are enabled
+  when: nextcloud_talk_hpb_signaling_container_labels_traefik_enabled | bool
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_signaling_container_labels_traefik_hostname | string | length > 0
+      - nextcloud_talk_hpb_signaling_container_labels_traefik_entrypoints | string | length > 0
+      - nextcloud_talk_hpb_signaling_container_labels_traefik_tls_certResolver | string | length > 0
+    fail_msg: >-
+      Traefik labels are enabled, so nextcloud_talk_hpb_signaling_container_labels_traefik_hostname,
+      ..._traefik_entrypoints and ..._traefik_tls_certResolver must all be set.
+
+- name: Warn that the allowall backend mode is test-only
+  when: nextcloud_talk_hpb_signaling_backends_allowall | bool
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: nextcloud_talk_hpb_signaling_backends_allowall is enabled. This accepts any
+      Nextcloud backend endpoint and MUST NOT be used in production.
+
+- name: Validate that the allowall backend secret is set when the allowall mode is enabled
+  when: nextcloud_talk_hpb_signaling_backends_allowall | bool
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_signaling_backends_allowall_secret | string | length > 0
+    fail_msg: "nextcloud_talk_hpb_signaling_backends_allowall_secret must be set when the allowall mode is enabled."
+
+- name: Inspect the external proxy network of the reverse proxy
+  community.docker.docker_network_info:
+    name: "{{ nextcloud_talk_hpb_proxy_network }}"
+  register: nextcloud_talk_hpb_proxy_network_info
+
+- name: Validate that the external proxy network exists
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_proxy_network_info.exists | bool
+    fail_msg: >-
+      The external proxy network '{{ nextcloud_talk_hpb_proxy_network }}' does not exist.
+      Create the external proxy network or set nextcloud_talk_hpb_proxy_network.
+
+- name: Detect the external proxy network subnet
+  when: nextcloud_talk_hpb_proxy_network_subnet | string | length == 0
+  ansible.builtin.set_fact:
+    nextcloud_talk_hpb_proxy_network_subnet: >-
+      {{
+        (
+          nextcloud_talk_hpb_proxy_network_info.network.IPAM.Config
+          | rejectattr('Subnet', 'undefined')
+          | map(attribute='Subnet')
+          | list
+          | first
+        ) | default('', true)
+      }}
+
+- name: Validate that the external proxy network subnet is a CIDR network
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_proxy_network_subnet | string | length > 0
+      - nextcloud_talk_hpb_proxy_network_subnet | nextcloud_talk_hpb_ip_network
+    fail_msg: >-
+      The external proxy network '{{ nextcloud_talk_hpb_proxy_network }}' has no usable IPv4 subnet
+      (detected: '{{ nextcloud_talk_hpb_proxy_network_subnet }}'). Set
+      nextcloud_talk_hpb_proxy_network_subnet explicitly.
+
+- name: Check whether a compose.yaml is checked in at the role root
+  ansible.builtin.stat:
+    path: "{{ role_path }}/compose.yaml"
+  register: nextcloud_talk_hpb_compose_file
+
+- name: Validate that no compose.yaml is checked in at the role root
+  ansible.builtin.assert:
+    that:
+      - not (nextcloud_talk_hpb_compose_file.stat.exists | bool)
+    fail_msg: >-
+      A compose.yaml exists at the role root. This role deploys through systemd-wrapped
+      containers only; remove the compose.yaml so that it cannot be deployed in parallel.

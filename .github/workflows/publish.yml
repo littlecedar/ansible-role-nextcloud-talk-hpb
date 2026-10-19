@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Publish
+
+# The role release tag (`v<version>-0`) is created separately and MUST NOT trigger an
+# image publish, so this workflow never runs on git tags.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Test and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Read the image version pins
+        id: pin
+        run: |
+          set -eu
+          for service in janus nats spreed; do
+            file="build/${service}/Dockerfile"
+            var=$(printf '%s' "$service" | tr '[:lower:]' '[:upper:]')_VERSION
+            version=$(sed -n "s/^ARG ${var}=\(.*\)$/\1/p" "$file" | head -n 1)
+            if [ -z "$version" ]; then
+              echo "Cannot read ARG ${var} from ${file}" >&2
+              exit 1
+            fi
+            echo "${service}_version=${version}" >>"$GITHUB_OUTPUT"
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute the Janus image tags
+        id: meta_janus
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.pin.outputs.janus_version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Compute the NATS image tags
+        id: meta_nats
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-nats
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.pin.outputs.nats_version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Compute the Spreed image tags
+        id: meta_spreed
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-spreed
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.pin.outputs.spreed_version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the Janus image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/janus
+          load: true
+          provenance: false
+          tags: ansible-role-nextcloud-talk-hpb:ci
+          labels: ${{ steps.meta_janus.outputs.labels }}
+          cache-from: type=gha,scope=janus
+          cache-to: type=gha,mode=max,scope=janus
+
+      - name: Build the NATS image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/nats
+          load: true
+          provenance: false
+          tags: nextcloud-talk-hpb-nats:ci
+          labels: ${{ steps.meta_nats.outputs.labels }}
+          cache-from: type=gha,scope=nats
+          cache-to: type=gha,mode=max,scope=nats
+
+      - name: Build the Spreed image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/spreed
+          load: true
+          provenance: false
+          tags: nextcloud-talk-hpb-spreed:ci
+          labels: ${{ steps.meta_spreed.outputs.labels }}
+          cache-from: type=gha,scope=spreed
+          cache-to: type=gha,mode=max,scope=spreed
+
+      # Nothing is pushed before the smoke tests and molecule pass.
+      - name: Run the Janus smoke test
+        run: ./scripts/smoke-test-janus.sh ansible-role-nextcloud-talk-hpb:ci
+
+      - name: Run the NATS smoke test
+        run: ./scripts/smoke-test-nats.sh nextcloud-talk-hpb-nats:ci
+
+      - name: Run the Spreed smoke test
+        run: ./scripts/smoke-test-spreed.sh nextcloud-talk-hpb-spreed:ci
+
+      - name: Install molecule and its Docker driver
+        run: pip install "molecule" "molecule-plugins[docker]"
+
+      - name: Install the Ansible role and collection dependencies
+        run: |
+          ansible-galaxy role install -r molecule/default/requirements.yml
+          ansible-galaxy collection install community.docker
+
+      - name: Run the role smoke test
+        run: molecule test
+        env:
+          # molecule-docker 2.1.0 still uses string conditionals, which
+          # ansible-core 2.21 rejects by default.
+          ANSIBLE_ALLOW_BROKEN_CONDITIONALS: "1"
+          PY_COLORS: "1"
+          ANSIBLE_FORCE_COLOR: "1"
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the image tags
+        env:
+          JANUS_TAGS: ${{ steps.meta_janus.outputs.tags }}
+          NATS_TAGS: ${{ steps.meta_nats.outputs.tags }}
+          SPREED_TAGS: ${{ steps.meta_spreed.outputs.tags }}
+        run: |
+          set -eu
+          push_tags() {
+            source_image=$1
+            tags=$2
+            printf '%s\n' "$tags" | while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              docker tag "$source_image" "$tag"
+              docker push "$tag"
+            done
+          }
+          push_tags ansible-role-nextcloud-talk-hpb:ci "$JANUS_TAGS"
+          push_tags nextcloud-talk-hpb-nats:ci "$NATS_TAGS"
+          push_tags nextcloud-talk-hpb-spreed:ci "$SPREED_TAGS"

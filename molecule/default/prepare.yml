@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Prepare
+  hosts: all
+  become: true
+  vars:
+    nextcloud_talk_hpb_molecule_project_directory: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+  tasks:
+    - name: Ensure the container runtime and verification tools are installed
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-buildx
+          - python3-pip
+          - curl
+          - git
+          - openssl
+          - iproute2
+        state: present
+        update_cache: true
+        cache_valid_time: 600
+
+    - name: Ensure the Docker Python bindings are installed
+      ansible.builtin.pip:
+        name: docker
+        state: present
+        extra_args: --break-system-packages
+
+    # The instance's Docker daemon stores its layers on the molecule container's
+    # overlayfs, where buildkit cannot convert whiteout files. vfs is slower but works
+    # in nested Docker; production hosts keep their own storage driver.
+    - name: Ensure the nested Docker daemon uses the vfs storage driver
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "storage-driver": "vfs"
+          }
+
+    - name: Ensure the Docker service is started
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for the Docker daemon socket
+      ansible.builtin.wait_for:
+        path: /var/run/docker.sock
+        timeout: 120
+
+    - name: Wait for the Docker daemon to answer
+      ansible.builtin.command:
+        cmd: docker info
+      register: nextcloud_talk_hpb_docker_info
+      changed_when: false
+      retries: 30
+      delay: 2
+      until: nextcloud_talk_hpb_docker_info.rc == 0
+
+    - name: Verify that the nested Docker daemon uses the vfs storage driver
+      ansible.builtin.command:
+        cmd: docker info --format {% raw %}'{{ .Driver }}'{% endraw %}
+      register: nextcloud_talk_hpb_docker_driver
+      changed_when: false
+      failed_when: nextcloud_talk_hpb_docker_driver.stdout | trim != 'vfs'
+
+    # The operator provides this network in production. The role must never create it.
+    - name: Ensure the external proxy network exists
+      community.docker.docker_network:
+        name: proxy
+        driver: bridge
+        ipam_config:
+          - subnet: 172.30.99.0/24
+
+    - name: Ensure the HPB test client build context directory exists
+      ansible.builtin.file:
+        path: /tmp/hpb-test-client
+        state: directory
+        mode: "0755"
+
+    - name: Ensure the HPB test client build context exists
+      ansible.builtin.copy:
+        src: "{{ nextcloud_talk_hpb_molecule_project_directory }}/build/test-client/Dockerfile"
+        dest: /tmp/hpb-test-client/Dockerfile
+        mode: "0644"
+
+    - name: Ensure the HPB test client configuration is installed
+      ansible.builtin.copy:
+        src: "{{ nextcloud_talk_hpb_molecule_project_directory }}/molecule/hpb-test-client.conf"
+        dest: /etc/hpb-client.conf
+        mode: "0644"
+
+    - name: Ensure the HPB test client image is built
+      community.docker.docker_image_build:
+        name: nextcloud-talk-hpb-test-client:local
+        path: /tmp/hpb-test-client
+        dockerfile: Dockerfile
+        pull: true
+
+    - name: Ensure the NATS and Spreed build context directories exist
+      ansible.builtin.file:
+        path: "/tmp/hpb-{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - nats
+        - spreed
+
+    - name: Ensure the NATS and Spreed build contexts exist
+      ansible.builtin.copy:
+        src: "{{ nextcloud_talk_hpb_molecule_project_directory }}/build/{{ item }}/Dockerfile"
+        dest: "/tmp/hpb-{{ item }}/Dockerfile"
+        mode: "0644"
+      loop:
+        - nats
+        - spreed
+
+    - name: Ensure the NATS and Spreed images are built
+      community.docker.docker_image_build:
+        name: "nextcloud-talk-hpb-{{ item }}:ci"
+        path: "/tmp/hpb-{{ item }}"
+        dockerfile: Dockerfile
+        pull: true
+      loop:
+        - nats
+        - spreed
+
+    - name: Ensure the Janus image source directory exists
+      ansible.builtin.file:
+        path: /srv/ansible-role-nextcloud-talk-hpb/build/janus
+        state: directory
+        mode: "0755"
+
+    - name: Ensure the Janus image source is staged
+      ansible.builtin.copy:
+        src: "{{ nextcloud_talk_hpb_molecule_project_directory }}/build/janus/{{ item }}"
+        dest: "/srv/ansible-role-nextcloud-talk-hpb/build/janus/{{ item }}"
+        mode: "{{ '0755' if item.endswith('.sh') else '0644' }}"
+      loop:
+        - Dockerfile
+        - docker-entrypoint.sh
+
+    # The role's self-build path clones a git ref, so stage the image source as a
+    # repository with the same tag the role pins (`v<version>-0`).
+    - name: Ensure the staged Janus image source is a tagged git repository
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          cd /srv/ansible-role-nextcloud-talk-hpb
+          [ -d .git ] || git init -q -b main
+          git -c user.email=molecule@example.invalid -c user.name=molecule add -A
+          git -c user.email=molecule@example.invalid -c user.name=molecule \
+            commit -q -m 'Janus image source' || true
+          git tag -f v1.4.3-0
+      changed_when: false

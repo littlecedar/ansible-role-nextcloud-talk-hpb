@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+galaxy_info:
+  author: littlecedar
+  role_name: nextcloud_talk_hpb
+  namespace: littlecedar
+  description: Nextcloud Talk high-performance backend (signaling, Janus, NATS)
+  platforms:
+    - name: Debian
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: ArchLinux
+      versions: [all]
+    - name: EL
+      versions: [all]
+  license: AGPL-3.0-or-later
+  min_ansible_version: "2.15"

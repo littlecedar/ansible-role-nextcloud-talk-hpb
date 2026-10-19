@@ -1,0 +1,45 @@
+{#
+SPDX-FileCopyrightText: 2026 Travis Wichert
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+# {{ ansible_managed }}
+[http]
+listen = 0.0.0.0:{{ nextcloud_talk_hpb_signaling_container_http_port }}
+
+[app]
+trustedproxies = {{ nextcloud_talk_hpb_proxy_network_subnet }}
+
+[sessions]
+hashkey = {{ nextcloud_talk_hpb_signaling_hash_key }}
+blockkey = {{ nextcloud_talk_hpb_signaling_block_key }}
+
+[clients]
+internalsecret = {{ nextcloud_talk_hpb_signaling_internal_shared_secret_key }}
+
+[nats]
+url = nats://{{ nextcloud_talk_hpb_nats_token }}@{{ nextcloud_talk_hpb_nats_container_ip }}:4222
+
+[mcu]
+type = janus
+url = ws://{{ nextcloud_talk_hpb_egress_gateway }}:8188
+maxstreambitrate = 1048576
+maxscreenbitrate = 2097152
+
+[backend]
+backendtype = static
+backends = nextcloud
+allowall = {{ nextcloud_talk_hpb_signaling_backends_allowall | bool | lower }}
+timeout = 10
+connectionsperhost = 32
+{% if nextcloud_talk_hpb_signaling_backends_allowall_secret | string | length > 0 %}
+secret = {{ nextcloud_talk_hpb_signaling_backends_allowall_secret }}
+{% endif %}
+
+[nextcloud]
+urls = {{ nextcloud_talk_hpb_nextcloud_url }}
+secret = {{ nextcloud_talk_hpb_signaling_secret }}
+
+[stats]
+allowed_ips = 127.0.0.1

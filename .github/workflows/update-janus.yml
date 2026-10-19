@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Update Janus
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-janus
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update the Janus pin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the latest Janus release
+        id: check
+        run: ./scripts/update-janus.sh
+
+      - name: Set up Python
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Docker buildx
+        if: steps.check.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the Janus image
+        if: steps.check.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: build/janus
+          load: true
+          provenance: false
+          tags: ansible-role-nextcloud-talk-hpb:update
+          cache-from: type=gha,scope=janus
+          cache-to: type=gha,mode=max,scope=janus
+
+      # The PR is created with GITHUB_TOKEN, so `ci.yml` does not run for it:
+      # both gates have to pass here, before the PR is opened.
+      - name: Run the image smoke test
+        if: steps.check.outputs.changed == 'true'
+        run: ./scripts/smoke-test-janus.sh ansible-role-nextcloud-talk-hpb:update
+
+      - name: Install molecule and its Docker driver
+        if: steps.check.outputs.changed == 'true'
+        run: pip install "molecule" "molecule-plugins[docker]"
+
+      - name: Install the Ansible role and collection dependencies
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          ansible-galaxy role install -r molecule/default/requirements.yml
+          ansible-galaxy collection install community.docker
+
+      - name: Run the role smoke test
+        if: steps.check.outputs.changed == 'true'
+        run: molecule test
+        env:
+          # molecule-docker 2.1.0 still uses string conditionals, which
+          # ansible-core 2.21 rejects by default.
+          ANSIBLE_ALLOW_BROKEN_CONDITIONALS: "1"
+          PY_COLORS: "1"
+          ANSIBLE_FORCE_COLOR: "1"
+
+      - name: Open or update the pull request
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+          COMMIT: ${{ steps.check.outputs.commit }}
+          PREVIOUS: ${{ steps.check.outputs.previous }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c automation/janus-update
+          git add build/janus/Dockerfile defaults/main.yml
+          git commit -m "Update Janus to ${VERSION}"
+          git push --force origin automation/janus-update
+
+          body=$(printf '%s\n\n%s\n%s\n' \
+            "Updates Janus from ${PREVIOUS} to ${VERSION} (\`${COMMIT}\`), the image tag in \`defaults/main.yml\` and the self-build role release tag." \
+            "- [Upstream changelog](https://github.com/meetecho/janus-gateway/blob/master/CHANGELOG.md)" \
+            "- [Compare v${PREVIOUS}...v${VERSION}](https://github.com/meetecho/janus-gateway/compare/v${PREVIOUS}...v${VERSION})")
+
+          if gh pr view automation/janus-update >/dev/null 2>&1; then
+            gh pr edit automation/janus-update --title "Update Janus to ${VERSION}" --body "$body"
+          else
+            gh pr create --base main --head automation/janus-update \
+              --title "Update Janus to ${VERSION}" --body "$body"
+          fi

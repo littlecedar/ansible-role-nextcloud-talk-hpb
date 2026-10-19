@@ -1,0 +1,52 @@
+{#
+SPDX-FileCopyrightText: 2026 Travis Wichert
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[Unit]
+Description=Nextcloud Talk HPB Janus MCU ({{ nextcloud_talk_hpb_janus_identifier }})
+{% for service in nextcloud_talk_hpb_janus_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in nextcloud_talk_hpb_janus_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+{% for service in nextcloud_talk_hpb_janus_systemd_after_services_list %}
+After={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre={{ devture_systemd_docker_base_host_command_sh }} -c '{{ nextcloud_talk_hpb_janus_container_cleanup_command | trim | replace("\n", " ") }}'
+
+# Host networking is required for the Janus RTP port range: publishing ~20k UDP ports
+# through the Docker userland proxy is not viable. The control plane stays loopback-only.
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+      --rm \
+      --name={{ nextcloud_talk_hpb_janus_identifier }} \
+      --log-driver=none \
+      --user=10001:10001 \
+      --network=host \
+      --read-only \
+      --tmpfs=/tmp:rw,noexec,nosuid,size={{ nextcloud_talk_hpb_janus_container_tmpfs_tmp_size }},mode=1777 \
+      --cap-drop=ALL \
+      --security-opt=no-new-privileges \
+      --init \
+      --env-file={{ nextcloud_talk_hpb_base_path }}/janus.env \
+      {{ nextcloud_talk_hpb_janus_container_image }}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ nextcloud_talk_hpb_janus_identifier }}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ nextcloud_talk_hpb_janus_container_stop_grace_time_seconds }} {{ nextcloud_talk_hpb_janus_identifier }} 2>/dev/null || true'
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ nextcloud_talk_hpb_janus_identifier }} 2>/dev/null || true'
+
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ nextcloud_talk_hpb_janus_identifier }}
+
+[Install]
+WantedBy=multi-user.target

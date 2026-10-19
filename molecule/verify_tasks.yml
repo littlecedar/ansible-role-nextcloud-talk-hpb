@@ -1,0 +1,410 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# Shared verification tasks for the Nextcloud Talk HPB role.
+# They run inside the molecule instance, where the systemd units, the containers and
+# their networks all live.
+
+- name: Verify that the Nextcloud Talk HPB units become active
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ item }}
+  register: nextcloud_talk_hpb_verify_unit_state
+  changed_when: false
+  retries: 60
+  delay: 2
+  until: nextcloud_talk_hpb_verify_unit_state.stdout | trim == 'active'
+  failed_when: nextcloud_talk_hpb_verify_unit_state.stdout | trim != 'active'
+  loop:
+    - nextcloud-talk-hpb-nats.service
+    - nextcloud-talk-hpb-signaling.service
+    - nextcloud-talk-hpb-janus.service
+
+# --- 1. Signaling reachability and the Janus event handler connection --------
+
+- name: Wait for the signaling HTTP port to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 8081
+    timeout: 60
+
+- name: Request the signaling welcome endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8081/api/v1/welcome
+    status_code: 200
+
+- name: Read the signaling service journal
+  ansible.builtin.command:
+    cmd: journalctl -u nextcloud-talk-hpb-signaling.service --no-pager --lines 2000
+  register: nextcloud_talk_hpb_verify_signaling_journal
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: "'Processing Janus events' in nextcloud_talk_hpb_verify_signaling_journal.stdout"
+
+- name: Verify that the signaling server is connected to the Janus event handler
+  ansible.builtin.assert:
+    that:
+      - "'Processing Janus events' in nextcloud_talk_hpb_verify_signaling_journal.stdout"
+
+# --- 2. HPB protocol smoke through the signaling client ----------------------
+
+- name: Run the HPB test client against the signaling server
+  ansible.builtin.command:
+    cmd: >-
+      timeout --signal=INT 20
+      docker run --rm --network nextcloud-talk-hpb-hpb
+      --mount type=bind,src=/etc/hpb-client.conf,dst=/etc/client.conf,readonly
+      nextcloud-talk-hpb-test-client:local
+      -addr nextcloud-talk-hpb-signaling:8081
+      -config /etc/client.conf
+      -maxClients 2
+  register: nextcloud_talk_hpb_verify_test_client
+  changed_when: false
+  failed_when: false
+
+- name: Verify that the test client completed the hello/auth/message exchange
+  vars:
+    # The client logs through Go's `log` package, which writes to stderr. Its own mock
+    # backend returns payloads its parser rejects, which is unrelated to the signaling
+    # path under test, so only the connection handshake is asserted.
+    client_output: "{{ nextcloud_talk_hpb_verify_test_client.stdout }}\n{{ nextcloud_talk_hpb_verify_test_client.stderr }}"
+  ansible.builtin.assert:
+    that:
+      - "'All connections established' in client_output"
+    fail_msg: |
+      The HPB test client did not establish its connections.
+      {{ client_output }}
+
+# --- 3. Janus API ------------------------------------------------------------
+
+- name: Request the Janus info endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8088/janus/info
+    status_code: 200
+  register: nextcloud_talk_hpb_verify_janus_info
+
+- name: Verify the Janus feature set and library versions
+  vars:
+    janus_info: "{{ nextcloud_talk_hpb_verify_janus_info.json }}"
+  ansible.builtin.assert:
+    that:
+      - janus_info['version_string'] == '1.4.3'
+      - janus_info['plugins'] | list == ['janus.plugin.videoroom']
+      - janus_info['transports'] | list | sort == ['janus.transport.http', 'janus.transport.websockets']
+      - janus_info['events'] | list == ['janus.eventhandler.wsevh']
+      - "'0.1.24' in janus_info['dependencies']['libnice']"
+      - "'2.8.1' in janus_info['dependencies']['libsrtp']"
+
+# --- 4. Janus generated configuration ---------------------------------------
+
+- name: Read the generated Janus configuration
+  ansible.builtin.command:
+    cmd: docker exec nextcloud-talk-hpb-janus cat /tmp/janus-config/janus.jcfg
+  register: nextcloud_talk_hpb_verify_janus_jcfg
+  changed_when: false
+  no_log: true
+
+- name: Verify the generated Janus configuration
+  vars:
+    janus_jcfg: "{{ nextcloud_talk_hpb_verify_janus_jcfg.stdout }}"
+  ansible.builtin.assert:
+    that:
+      - janus_jcfg is search('(?m)^\s*turn_server = "127\.0\.0\.1"$')
+      - janus_jcfg is search('(?m)^\s*turn_port = 3478$')
+      - janus_jcfg is search('(?m)^\s*turn_user = ".+"$')
+      - janus_jcfg is search('(?m)^\s*turn_pwd = ".+"$')
+      - janus_jcfg is search('(?m)^\s*rtp_port_range = "20000-20010"$')
+      - janus_jcfg is search('(?m)^\s*nat_1_1_mapping = "127\.0\.0\.1"$')
+      - janus_jcfg is search('(?m)^\s*broadcast = true$')
+      - janus_jcfg is not search('room-1234')
+
+- name: Verify the generated Janus transport and event handler configuration
+  ansible.builtin.command:
+    cmd: docker exec nextcloud-talk-hpb-janus cat {{ item }}
+  register: nextcloud_talk_hpb_verify_janus_extra_jcfg
+  changed_when: false
+  no_log: true
+  loop:
+    - /tmp/janus-config/janus.transport.websockets.jcfg
+    - /tmp/janus-config/janus.eventhandler.wsevh.jcfg
+    - /tmp/janus-config/janus.transport.http.jcfg
+
+- name: Verify the Janus WebSocket transport, event handler and HTTP transport
+  vars:
+    ws_jcfg: "{{ nextcloud_talk_hpb_verify_janus_extra_jcfg.results[0].stdout }}"
+    wsevh_jcfg: "{{ nextcloud_talk_hpb_verify_janus_extra_jcfg.results[1].stdout }}"
+    http_jcfg: "{{ nextcloud_talk_hpb_verify_janus_extra_jcfg.results[2].stdout }}"
+  ansible.builtin.assert:
+    that:
+      - ws_jcfg is search('(?m)^\s*ws_ip = "172\.29\.0\.1"$')
+      - ws_jcfg is search('(?m)^\s*ws_acl = "172\.29\.0\."$')
+      - ws_jcfg is search('(?m)^\s*admin_ws = false$')
+      - wsevh_jcfg is search('(?m)^\s*enabled = true$')
+      - wsevh_jcfg is search('(?m)^\s*backend = "ws://127\.0\.0\.1:8081/spreed"$')
+      - http_jcfg is search('(?m)^\s*ip = "127\.0\.0\.1"$')
+      - http_jcfg is search('(?m)^\s*acl = "127\.0\.0\.1"$')
+      - http_jcfg is search('(?m)^\s*admin_http = false$')
+
+- name: Verify that the Janus TURN password is derived from the TURN REST secret
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      config=$(docker exec nextcloud-talk-hpb-janus cat /tmp/janus-config/janus.jcfg)
+      turn_user=$(printf '%s\n' "$config" | sed -n 's/^[[:space:]]*turn_user = "\(.*\)"$/\1/p')
+      turn_pwd=$(printf '%s\n' "$config" | sed -n 's/^[[:space:]]*turn_pwd = "\(.*\)"$/\1/p')
+      test -n "$turn_user"
+      test -n "$turn_pwd"
+      expected=$(printf '%s' "$turn_user" | openssl dgst -sha1 -hmac 'smoke-turn-secret' -binary | openssl base64)
+      test "$expected" = "$turn_pwd"
+      echo verified
+  register: nextcloud_talk_hpb_verify_turn_hmac
+  changed_when: false
+  no_log: true
+
+- name: Verify the TURN REST credential derivation
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_verify_turn_hmac.stdout | trim == 'verified'
+
+# --- 5. Signaling generated configuration -----------------------------------
+
+- name: Read the generated signaling server configuration
+  ansible.builtin.command:
+    cmd: cat /nextcloud-talk-hpb/signaling.conf
+  register: nextcloud_talk_hpb_verify_server_conf
+  changed_when: false
+  no_log: true
+
+- name: Verify the generated signaling server configuration
+  vars:
+    server_conf: "{{ nextcloud_talk_hpb_verify_server_conf.stdout }}"
+  ansible.builtin.assert:
+    that:
+      - server_conf is search('(?m)^\s*backends = nextcloud\s*$')
+      - server_conf is search('(?m)^\s*allowall = true\s*$')
+      - server_conf is search('nats://smoke-nats-token@172\.28\.0\.4:4222')
+      - server_conf is search('ws://172\.29\.0\.1:8188')
+      - server_conf is search('(?m)^\s*trustedproxies = 172\.30\.99\.0/24\s*$')
+      - server_conf is search('(?m)^\s*allowed_ips = 127\.0\.0\.1\s*$')
+      - server_conf is search('(?m)^\s*urls = https://example\.invalid\s*$')
+      - server_conf is search('(?m)^\s*secret = smoke-signaling-secret\s*$')
+      - server_conf is not search('(?m)^\s*turnserver = .+$')
+      - server_conf is not search('(?m)^\s*turnsecret = .+$')
+      - server_conf is not search('(?m)^\s*turnapikey = .+$')
+
+# The stock `[turn]` section is empty (the operator's TURN server is external), so the
+# endpoint answers 400 (or 404) instead of handing out credentials.
+- name: Verify that the signaling server exposes no TURN credentials
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8081/turn/credentials
+    status_code: [400, 404]
+
+# --- 6. Container isolation -------------------------------------------------
+
+- name: Inspect the Nextcloud Talk HPB containers
+  ansible.builtin.command:
+    cmd: docker inspect {{ item }}
+  register: nextcloud_talk_hpb_verify_inspect
+  changed_when: false
+  loop:
+    - nextcloud-talk-hpb-signaling
+    - nextcloud-talk-hpb-janus
+    - nextcloud-talk-hpb-nats
+
+- name: Collect the inspected container state
+  ansible.builtin.set_fact:
+    nextcloud_talk_hpb_verify_signaling_container: "{{ (nextcloud_talk_hpb_verify_inspect.results | selectattr('item', 'equalto', 'nextcloud-talk-hpb-signaling') | list | first).stdout | from_json | first }}"
+    nextcloud_talk_hpb_verify_janus_container: "{{ (nextcloud_talk_hpb_verify_inspect.results | selectattr('item', 'equalto', 'nextcloud-talk-hpb-janus') | list | first).stdout | from_json | first }}"
+    nextcloud_talk_hpb_verify_nats_container: "{{ (nextcloud_talk_hpb_verify_inspect.results | selectattr('item', 'equalto', 'nextcloud-talk-hpb-nats') | list | first).stdout | from_json | first }}"
+
+- name: Verify the container isolation of the signaling server
+  vars:
+    signaling: "{{ nextcloud_talk_hpb_verify_signaling_container }}"
+  ansible.builtin.assert:
+    that:
+      - signaling['Config']['User'] == '1000:1000'
+      - signaling['HostConfig']['ReadonlyRootfs'] | bool
+      - "'ALL' in signaling['HostConfig']['CapDrop']"
+      - (signaling['HostConfig']['CapAdd'] or []) | length == 0
+      - signaling['HostConfig']['SecurityOpt'] | select('search', 'no-new-privileges') | list | length > 0
+
+- name: Verify the container isolation of the Janus MCU
+  vars:
+    janus: "{{ nextcloud_talk_hpb_verify_janus_container }}"
+  ansible.builtin.assert:
+    that:
+      - janus['Config']['User'] == '10001:10001'
+      - janus['HostConfig']['ReadonlyRootfs'] | bool
+      - "'ALL' in janus['HostConfig']['CapDrop']"
+      - janus['HostConfig']['NetworkMode'] == 'host'
+      - janus['HostConfig']['SecurityOpt'] | select('search', 'no-new-privileges') | list | length > 0
+
+- name: Verify the container isolation of NATS
+  vars:
+    nats: "{{ nextcloud_talk_hpb_verify_nats_container }}"
+  ansible.builtin.assert:
+    that:
+      - nats['Config']['User'] == '1000:1000'
+      - nats['HostConfig']['ReadonlyRootfs'] | bool
+      - "'ALL' in nats['HostConfig']['CapDrop']"
+      - nats['HostConfig']['PortBindings'] | default({}) | length == 0
+
+- name: Verify the effective user of the Janus process
+  ansible.builtin.command:
+    cmd: docker exec nextcloud-talk-hpb-janus id -u
+  register: nextcloud_talk_hpb_verify_janus_uid
+  changed_when: false
+  failed_when: nextcloud_talk_hpb_verify_janus_uid.stdout | trim != '10001'
+
+# The NATS image is scratch-based (no `id`, no shell), so its effective user is read
+# from the host's view of the container process.
+- name: Verify the effective user of the NATS process
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      pid=$(docker inspect --format '{{ "{{" }} .State.Pid {{ "}}" }}' nextcloud-talk-hpb-nats)
+      grep -E '^Uid:' "/proc/${pid}/status" | cut -f2
+  register: nextcloud_talk_hpb_verify_nats_uid
+  changed_when: false
+  failed_when: nextcloud_talk_hpb_verify_nats_uid.stdout | trim != '1000'
+
+# The container runs as the role UID (1000 in molecule), with no entrypoint privilege drop.
+- name: Verify the effective user of the signaling process
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      pid=$(docker inspect --format '{{ "{{" }} .State.Pid {{ "}}" }}' nextcloud-talk-hpb-signaling)
+      grep -E '^Uid:' "/proc/${pid}/status" | cut -f2
+  register: nextcloud_talk_hpb_verify_signaling_uid
+  changed_when: false
+  failed_when: nextcloud_talk_hpb_verify_signaling_uid.stdout | trim != '1000'
+
+- name: Read the TCP listeners
+  ansible.builtin.command:
+    cmd: ss -Hlntp
+  register: nextcloud_talk_hpb_verify_tcp_listeners
+  changed_when: false
+
+- name: Verify the control-plane port bindings
+  vars:
+    tcp: "{{ nextcloud_talk_hpb_verify_tcp_listeners.stdout }}"
+  ansible.builtin.assert:
+    that:
+      - tcp is search('127\.0\.0\.1:8081\s')
+      - tcp is search('127\.0\.0\.1:8088\s')
+      - tcp is search('172\.29\.0\.1:8188\s')
+      - tcp is not search(':4222\s')
+      - tcp is not search('0\.0\.0\.0:8081\s')
+      - tcp is not search('0\.0\.0\.0:8088\s')
+      - tcp is not search('0\.0\.0\.0:8188\s')
+
+- name: Verify that no UDP listener is exposed outside the Janus RTP range
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      ss -Hlnu | awk '{print $4}' | while read -r local; do
+        address=${local%:*}
+        port=${local##*:}
+        case "$address" in
+          127.*|\[::1\]|::1) continue ;;
+        esac
+        if [ "$port" -lt 20000 ] || [ "$port" -gt 20010 ]; then
+          echo "$local"
+        fi
+      done
+  register: nextcloud_talk_hpb_verify_udp_listeners
+  changed_when: false
+
+- name: Verify that the only publicly bound UDP ports are the Janus RTP range
+  ansible.builtin.assert:
+    that:
+      - nextcloud_talk_hpb_verify_udp_listeners.stdout | trim | length == 0
+    fail_msg: >-
+      Unexpected non-loopback UDP listeners: {{ nextcloud_talk_hpb_verify_udp_listeners.stdout }}
+
+# --- 7. No secret leaks ------------------------------------------------------
+
+- name: Read the Nextcloud Talk HPB journals
+  ansible.builtin.command:
+    cmd: journalctl -u {{ item }} --no-pager --lines 5000
+  register: nextcloud_talk_hpb_verify_journals
+  changed_when: false
+  no_log: true
+  loop:
+    - nextcloud-talk-hpb-nats.service
+    - nextcloud-talk-hpb-signaling.service
+    - nextcloud-talk-hpb-janus.service
+
+- name: Verify that no secret appears in the unit journals
+  vars:
+    journal_text: "{{ nextcloud_talk_hpb_verify_journals.results | map(attribute='stdout') | join('\n') }}"
+    leaked: "{{ nextcloud_talk_hpb_molecule_secrets | select('in', journal_text) | list }}"
+  ansible.builtin.assert:
+    that:
+      - leaked | length == 0
+    fail_msg: "The unit journals contain secret values."
+
+- name: Read the container command lines and mounts
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect --format
+      '{{ "{{" }} json .Config.Entrypoint {{ "}}" }}{{ "{{" }} json .Config.Cmd {{ "}}" }}{{ "{{" }} json .Args {{ "}}" }}{{ "{{" }} json .Mounts {{ "}}" }}{{ "{{" }} json .HostConfig.Binds {{ "}}" }}'
+      {{ item }}
+  register: nextcloud_talk_hpb_verify_visible_config
+  changed_when: false
+  no_log: true
+  loop:
+    - nextcloud-talk-hpb-signaling
+    - nextcloud-talk-hpb-janus
+    - nextcloud-talk-hpb-nats
+
+- name: Verify that no secret appears in any inspectable container field
+  vars:
+    inspectable: "{{ nextcloud_talk_hpb_verify_visible_config.results | map(attribute='stdout') | join('\n') }}"
+    leaked: "{{ nextcloud_talk_hpb_molecule_secrets | select('in', inspectable) | list }}"
+  ansible.builtin.assert:
+    that:
+      - leaked | length == 0
+    fail_msg: "A secret is visible in a container's command line, mounts or arguments."
+
+- name: Verify that the support files are not world readable
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: nextcloud_talk_hpb_verify_support_files
+  loop:
+    - /nextcloud-talk-hpb/signaling.conf
+    - /nextcloud-talk-hpb/janus.env
+    - /nextcloud-talk-hpb/nats.conf
+    - /nextcloud-talk-hpb/signaling.labels
+
+- name: Verify the support file modes
+  ansible.builtin.assert:
+    that:
+      - item.stat.mode == '0640'
+    fail_msg: "{{ item.item }} has mode {{ item.stat.mode }}, expected 0640"
+    quiet: true
+  loop: "{{ nextcloud_talk_hpb_verify_support_files.results }}"
+
+# --- 8. Production defaults and templates -----------------------------------
+
+- name: Load the role defaults
+  ansible.builtin.set_fact:
+    nextcloud_talk_hpb_verify_defaults: >-
+      {{ lookup('file', nextcloud_talk_hpb_molecule_project_directory ~ '/defaults/main.yml') | from_yaml }}
+
+- name: Verify that the allowall backend mode is disabled by default
+  ansible.builtin.assert:
+    that:
+      - not (nextcloud_talk_hpb_verify_defaults['nextcloud_talk_hpb_signaling_backends_allowall'] | bool)
+
+- name: Verify that the production signaling configuration exposes no TURN configuration
+  vars:
+    signaling_config_template: "{{ lookup('file', nextcloud_talk_hpb_molecule_project_directory ~ '/templates/signaling.conf.j2') }}"
+  ansible.builtin.assert:
+    that:
+      - "'[turn]' not in signaling_config_template"
+      - "'turnserver' not in signaling_config_template"
+      - "'turnsecret' not in signaling_config_template"
+      - "'turnapikey' not in signaling_config_template"

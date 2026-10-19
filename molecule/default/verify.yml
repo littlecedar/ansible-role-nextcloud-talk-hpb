@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Verify
+  hosts: all
+  become: true
+  vars:
+    nextcloud_talk_hpb_molecule_project_directory: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    # The secrets the converge playbook installs. None of them may reach a log.
+    nextcloud_talk_hpb_molecule_secrets:
+      - smoke-turn-secret
+      - smoke-signaling-secret
+      - smoke-hash-key-0123456789abcdef0123456789abcdef0123456789abcdef0
+      - smoke-block-key-0123456789abcdef
+      - smoke-internal-secret
+      - smoke-nats-token
+      - smoke-secret
+  tasks:
+    - name: Include the shared Nextcloud Talk HPB verification tasks
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../verify_tasks.yml"

@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Check which Nextcloud Talk HPB systemd units exist
+  ansible.builtin.stat:
+    path: "{{ devture_systemd_docker_base_systemd_path }}/{{ item }}.service"
+  register: nextcloud_talk_hpb_systemd_unit_stat
+  loop:
+    - "{{ nextcloud_talk_hpb_nats_identifier }}"
+    - "{{ nextcloud_talk_hpb_signaling_identifier }}"
+    - "{{ nextcloud_talk_hpb_janus_identifier }}"
+
+- name: Ensure the Nextcloud Talk HPB systemd units are stopped and disabled
+  when: item.stat.exists | bool
+  ansible.builtin.systemd_service:
+    name: "{{ item.item }}.service"
+    state: stopped
+    enabled: false
+  loop: "{{ nextcloud_talk_hpb_systemd_unit_stat.results }}"
+
+- name: Ensure the Nextcloud Talk HPB systemd unit files are removed
+  when: item.stat.exists | bool
+  ansible.builtin.file:
+    path: "{{ item.stat.path }}"
+    state: absent
+  loop: "{{ nextcloud_talk_hpb_systemd_unit_stat.results }}"
+
+- name: Reload the systemd daemon after removing the Nextcloud Talk HPB units
+  when: nextcloud_talk_hpb_systemd_unit_stat.results | selectattr('stat.exists') | list | length > 0
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# The external proxy network is managed by the operator and is never removed here,
+# regardless of `nextcloud_talk_hpb_proxy_network_deletion_enabled`.
+- name: Ensure the internal Nextcloud Talk HPB container networks are removed via community.docker.docker_network
+  when:
+    - devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+    - item.deletion_enabled | bool
+  community.docker.docker_network:
+    name: "{{ item.name }}"
+    state: absent
+  loop:
+    - name: "{{ nextcloud_talk_hpb_hpb_network }}"
+      deletion_enabled: "{{ nextcloud_talk_hpb_hpb_network_deletion_enabled }}"
+    - name: "{{ nextcloud_talk_hpb_egress_network }}"
+      deletion_enabled: "{{ nextcloud_talk_hpb_egress_network_deletion_enabled }}"
+
+- name: Ensure the internal Nextcloud Talk HPB container networks are removed via ansible.builtin.command
+  when:
+    - devture_systemd_docker_base_container_network_creation_method == 'command'
+    - item.deletion_enabled | bool
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} network rm {{ item.name }}"
+  register: nextcloud_talk_hpb_network_removal_result
+  changed_when: nextcloud_talk_hpb_network_removal_result.rc == 0
+  failed_when: >-
+    nextcloud_talk_hpb_network_removal_result.rc != 0
+    and 'No such network' not in nextcloud_talk_hpb_network_removal_result.stderr
+  loop:
+    - name: "{{ nextcloud_talk_hpb_hpb_network }}"
+      deletion_enabled: "{{ nextcloud_talk_hpb_hpb_network_deletion_enabled }}"
+    - name: "{{ nextcloud_talk_hpb_egress_network }}"
+      deletion_enabled: "{{ nextcloud_talk_hpb_egress_network_deletion_enabled }}"
+
+- name: Ensure the Nextcloud Talk HPB base path is removed
+  ansible.builtin.file:
+    path: "{{ nextcloud_talk_hpb_base_path }}"
+    state: absent

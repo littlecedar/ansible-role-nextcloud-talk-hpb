@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: 2026 Travis Wichert
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure the Nextcloud Talk HPB base path exists
+  ansible.builtin.file:
+    path: "{{ nextcloud_talk_hpb_base_path }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ nextcloud_talk_hpb_uid }}"
+    group: "{{ nextcloud_talk_hpb_gid }}"
+
+# `nextcloud_talk_hpb_proxy_network_subnet` is detected (and validated) in validate_config.yml,
+# which always runs before these tasks. The external proxy network itself is created and
+# deleted by the operator: this role only attaches the signaling container to it.
+
+- name: Ensure the internal Nextcloud Talk HPB container networks exist via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    name: "{{ item.name }}"
+    driver: bridge
+    internal: "{{ item.internal }}"
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+    ipam_config: "{{ item.ipam_config }}"
+  register: nextcloud_talk_hpb_network_result_ansible_module
+  loop:
+    - name: "{{ nextcloud_talk_hpb_hpb_network }}"
+      internal: true
+      ipam_config:
+        - subnet: "{{ nextcloud_talk_hpb_hpb_subnet }}"
+    - name: "{{ nextcloud_talk_hpb_egress_network }}"
+      internal: false
+      ipam_config:
+        - subnet: "{{ nextcloud_talk_hpb_egress_subnet }}"
+          gateway: "{{ nextcloud_talk_hpb_egress_gateway }}"
+
+- name: Ensure the internal Nextcloud Talk HPB container networks exist via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {% if item.internal %}--internal{% endif %}
+      --subnet {{ item.subnet }}
+      {% if item.gateway is defined %}--gateway {{ item.gateway }}{% endif %}
+      {{ item.name }}
+  register: nextcloud_talk_hpb_network_result_command
+  changed_when: nextcloud_talk_hpb_network_result_command.rc == 0
+  failed_when: >-
+    nextcloud_talk_hpb_network_result_command.rc != 0
+    and 'already exists' not in nextcloud_talk_hpb_network_result_command.stderr
+  loop:
+    - name: "{{ nextcloud_talk_hpb_hpb_network }}"
+      internal: true
+      subnet: "{{ nextcloud_talk_hpb_hpb_subnet }}"
+    - name: "{{ nextcloud_talk_hpb_egress_network }}"
+      internal: false
+      subnet: "{{ nextcloud_talk_hpb_egress_subnet }}"
+      gateway: "{{ nextcloud_talk_hpb_egress_gateway }}"
+
+# `community.docker.docker_image_pull` splits `repo:tag@sha256:...` at the `@` and sends
+# an invalid reference to the registry, so digest-pinned images are always pulled with
+# the Docker CLI and the module only handles plain tag references.
+- name: Ensure the digest-pinned Nextcloud Talk HPB container images are pulled via ansible.builtin.command
+  when:
+    - item.enabled | bool
+    - "'@' in item.image"
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ item.image }}"
+  register: nextcloud_talk_hpb_image_pull_result_digest
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: nextcloud_talk_hpb_image_pull_result_digest is not failed
+  changed_when: "'Image is up to date' not in nextcloud_talk_hpb_image_pull_result_digest.stdout"
+  loop:
+    - image: "{{ nextcloud_talk_hpb_signaling_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_signaling_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_nats_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_nats_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_janus_container_image }}"
+      enabled: "{{ not (nextcloud_talk_hpb_janus_container_image_self_build | bool) }}"
+
+- name: Ensure the Nextcloud Talk HPB container images are pulled via community.docker.docker_image_pull
+  when:
+    - devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+    - item.enabled | bool
+    - "'@' not in item.image"
+  community.docker.docker_image_pull:
+    name: "{{ item.image }}"
+    pull: always
+  register: nextcloud_talk_hpb_image_pull_result_ansible_module
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: nextcloud_talk_hpb_image_pull_result_ansible_module is not failed
+  loop:
+    - image: "{{ nextcloud_talk_hpb_signaling_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_signaling_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_nats_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_nats_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_janus_container_image }}"
+      enabled: "{{ not (nextcloud_talk_hpb_janus_container_image_self_build | bool) }}"
+
+- name: Ensure the Nextcloud Talk HPB container images are pulled via ansible.builtin.command
+  when:
+    - devture_systemd_docker_base_container_image_pull_method == 'command'
+    - item.enabled | bool
+    - "'@' not in item.image"
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ item.image }}"
+  register: nextcloud_talk_hpb_image_pull_result_command
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: nextcloud_talk_hpb_image_pull_result_command is not failed
+  changed_when: "'Image is up to date' not in nextcloud_talk_hpb_image_pull_result_command.stdout"
+  loop:
+    - image: "{{ nextcloud_talk_hpb_signaling_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_signaling_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_nats_container_image }}"
+      enabled: "{{ nextcloud_talk_hpb_nats_container_image_pull | bool }}"
+    - image: "{{ nextcloud_talk_hpb_janus_container_image }}"
+      enabled: "{{ not (nextcloud_talk_hpb_janus_container_image_self_build | bool) }}"
+
+- name: Ensure the Janus container image source is cloned
+  when: nextcloud_talk_hpb_janus_container_image_self_build | bool
+  ansible.builtin.git:
+    repo: "{{ nextcloud_talk_hpb_janus_container_image_self_build_repo }}"
+    dest: "{{ nextcloud_talk_hpb_base_path }}/janus-src"
+    version: "{{ nextcloud_talk_hpb_janus_container_image_self_build_repo_version }}"
+    depth: 1
+  register: nextcloud_talk_hpb_janus_source_result
+
+- name: Ensure the Janus container image is built locally
+  when: nextcloud_talk_hpb_janus_container_image_self_build | bool
+  community.docker.docker_image_build:
+    name: "{{ nextcloud_talk_hpb_janus_container_image }}"
+    path: "{{ nextcloud_talk_hpb_base_path }}/janus-src/build/janus"
+    dockerfile: Dockerfile
+    pull: true
+  register: nextcloud_talk_hpb_janus_build_result
+
+# These files carry the signaling, NATS and TURN secrets, so the task is `no_log`:
+# neither a successful nor a failing run may print the rendered content.
+- name: Ensure the Nextcloud Talk HPB support files are installed
+  no_log: true
+  ansible.builtin.template:
+    src: "{{ role_path }}/{{ item.src }}"
+    dest: "{{ nextcloud_talk_hpb_base_path }}/{{ item.dest }}"
+    mode: "{{ item.mode }}"
+    owner: "{{ nextcloud_talk_hpb_uid }}"
+    group: "{{ nextcloud_talk_hpb_gid }}"
+  register: nextcloud_talk_hpb_support_files_result
+  loop:
+    - src: templates/signaling.conf.j2
+      dest: signaling.conf
+      mode: "0640"
+    - src: templates/janus.env.j2
+      dest: janus.env
+      mode: "0640"
+    - src: templates/nats.conf.j2
+      dest: nats.conf
+      mode: "0640"
+    - src: templates/signaling.labels.j2
+      dest: signaling.labels
+      mode: "0640"
+
+- name: Ensure the Nextcloud Talk HPB systemd unit files are installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/{{ item.src }}"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ item.dest }}"
+    mode: "0644"
+  register: nextcloud_talk_hpb_systemd_unit_result
+  loop:
+    - src: templates/systemd/nats.service.j2
+      dest: "{{ nextcloud_talk_hpb_nats_identifier }}.service"
+    - src: templates/systemd/signaling.service.j2
+      dest: "{{ nextcloud_talk_hpb_signaling_identifier }}.service"
+    - src: templates/systemd/janus.service.j2
+      dest: "{{ nextcloud_talk_hpb_janus_identifier }}.service"
+
+- name: Determine whether the Nextcloud Talk HPB units need a restart
+  ansible.builtin.set_fact:
+    nextcloud_talk_hpb_restart_necessary: >-
+      {{
+        (
+          (nextcloud_talk_hpb_support_files_result.changed | default(false))
+          or (nextcloud_talk_hpb_systemd_unit_result.changed | default(false))
+          or ((nextcloud_talk_hpb_image_pull_result_ansible_module | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_image_pull_result_digest | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_image_pull_result_command | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_janus_source_result | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_janus_build_result | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_network_result_ansible_module | default({})).changed | default(false))
+          or ((nextcloud_talk_hpb_network_result_command | default({})).changed | default(false))
+        ) | bool
+      }}
