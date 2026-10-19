@@ -39,7 +39,10 @@ the `community.docker` collection.
 
 ## Container images
 
-The role consumes three images built and published by this repository:
+The role consumes three images built and published by this repository. GHCR packages
+are private unless you make them public, and the role pulls anonymously: either make
+all three packages public, or authenticate the target Docker daemon with a token that
+has `read:packages`.
 
 | Service | Default image | Pinned version |
 | --- | --- | --- |
@@ -252,9 +255,16 @@ removes `nextcloud_talk_hpb_base_path`. The external proxy network is untouched.
 
 ## Troubleshooting
 
-**An image cannot be pulled from GHCR.** The tag is not published yet, or the package
-is not visible to the host. Publish it by running the publish workflow on `main`, or
-build it locally (`docker build -t <image> build/<service>`) and set the matching
+**An image cannot be pulled from GHCR.** The tag is not published yet, the packages are
+private, or the package is not visible to the host. Make all three packages public, or
+authenticate the target Docker daemon with a token that has `read:packages`:
+
+```sh
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+```
+
+Alternatively, publish the tag by running the publish workflow on `main`, or build the
+image locally (`docker build -t <image> build/<service>`) and set the matching
 `nextcloud_talk_hpb_signaling_container_image` or
 `nextcloud_talk_hpb_nats_container_image` with `*_container_image_pull: false`. Janus
 has no pull toggle and is always pulled from `nextcloud_talk_hpb_janus_container_image`

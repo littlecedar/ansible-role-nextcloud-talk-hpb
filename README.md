@@ -156,8 +156,11 @@ is never removed, even with `nextcloud_talk_hpb_proxy_network_deletion_enabled: 
 ## Container images
 
 All three defaults are consumed from GHCR; this repository builds and publishes them.
-Only Janus supports a target-side self-build. NATS and Spreed are used either from the
-published images or from images you build locally and point the role at with
+GHCR packages are private unless you make them public, and the role pulls anonymously:
+either make all three packages public, or authenticate the target Docker daemon with a
+token that has `read:packages`. Only Janus supports a target-side self-build. NATS and
+Spreed are used either from the published images or from images you build locally and
+point the role at with
 `nextcloud_talk_hpb_nats_container_image` or `nextcloud_talk_hpb_signaling_container_image`
 plus the matching `*_container_image_pull: false`.
 
