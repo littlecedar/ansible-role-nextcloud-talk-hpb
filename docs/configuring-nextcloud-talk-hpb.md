@@ -29,7 +29,10 @@ referenced only through the contract described below.
 ## Requirements
 
 - Docker and systemd on the target host.
-- The external proxy network (default `proxy`) created **before** the playbook runs.
+- The external proxy network (default `proxy`; in MASH, the playbook's
+  `mash_playbook_reverse_proxyable_services_additional_network`) present **before
+  this role runs**. The playbook's Traefik component creates it when the playbook
+  manages Traefik; standalone, create it with `docker network create proxy`.
 - The TURN server running with the same TURN REST secret.
 - Nextcloud with the Talk app.
 
@@ -160,10 +163,13 @@ command lines, container logs and world-readable files.
 
 ## External relay proxy (Traefik)
 
-1. Create the external network before running the playbook: `docker network create proxy`.
-2. Attach the operator's Traefik container to it (in MASH:
-   `traefik_container_additional_networks_custom: ["{{ nextcloud_talk_hpb_proxy_network }}"]`).
-3. Either let the role render Docker labels
+1. Point the role at the network your reverse proxy is attached to:
+   `nextcloud_talk_hpb_proxy_network` (default `proxy`). In MASH the component sets it
+   to `mash_playbook_reverse_proxyable_services_additional_network`, which is the
+   playbook-managed Traefik network or the one you named for your own Traefik (see
+   `components/traefik/README.md`). Standalone, create it once:
+   `docker network create proxy`.
+2. Either let the role render Docker labels
    (`nextcloud_talk_hpb_signaling_container_labels_traefik_enabled: true`, the default),
    or set it to `false` and route manually.
 

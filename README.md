@@ -38,8 +38,11 @@ flowchart LR
 ## Requirements
 
 - Linux with Docker and systemd on the target host.
-- An external Docker network (`proxy` by default) that the operator creates before the
-  playbook runs and that the operator's Traefik container is attached to.
+- An external Docker network (`proxy` by default) that the reverse proxy is attached to.
+  In MASH the component uses the playbook's
+  `mash_playbook_reverse_proxyable_services_additional_network` (the Traefik component
+  creates it when the playbook manages Traefik). Standalone, create it before running
+  the role with `docker network create proxy`.
 - A TURN server using TURN REST credentials (`coturn --use-auth-secret` or equivalent),
   sharing `nextcloud_talk_hpb_turn_static_auth_secret`.
 - A Nextcloud instance with the Talk app.
@@ -60,19 +63,53 @@ The only Ansible collection required is `community.docker` (`docker_network`,
 
 ## Using the role in the MASH playbook
 
-`templates/requirements.yml`:
+The playbook wires each role in with a *component*: a directory holding
+`component.yml` (when the component is in use, where it runs and what it adds to
+other components), `requirements.yml` (the role pin), `wiring.yml` (the role's
+default configuration) and `with/<other>.yml` (configuration which applies only
+while that other component is in use too). Your own components live in your
+inventory, for example `inventory/components/nextcloud_talk_hpb/`. The playbook
+generates `requirements.yml`, `setup.yml` and `group_vars/mash_servers/` from the
+components; do not edit those generated files.
+
+`inventory/components/nextcloud_talk_hpb/requirements.yml`:
 
 ```yaml
 - src: git+https://github.com/littlecedar/ansible-role-nextcloud-talk-hpb.git
   version: v1.4.3-0
   name: nextcloud_talk_hpb
-  activation_prefix: nextcloud_talk_hpb_
 ```
 
-`templates/setup.yml`: add `nextcloud_talk_hpb` after `nextcloud` (and after the
-playbook's Traefik role, if used).
+`inventory/components/nextcloud_talk_hpb/component.yml` (the component is in use
+when the inventory sets any variable starting with `nextcloud_talk_hpb_`):
 
-`templates/group_vars_mash_servers`, in a `# role-specific:nextcloud_talk_hpb` block:
+```yaml
+activation_prefix: nextcloud_talk_hpb_
+
+inject:
+  systemd_service_manager:
+    services:
+      - name: "{{ nextcloud_talk_hpb_nats_identifier }}.service"
+        priority: 2000
+        restart_necessary: "{{ nextcloud_talk_hpb_restart_necessary | bool }}"
+        groups: [mash, nextcloud-talk-hpb]
+        when: "{{ nextcloud_talk_hpb_enabled }}"
+      - name: "{{ nextcloud_talk_hpb_signaling_identifier }}.service"
+        priority: 2001
+        restart_necessary: "{{ nextcloud_talk_hpb_restart_necessary | bool }}"
+        groups: [mash, nextcloud-talk-hpb]
+        when: "{{ nextcloud_talk_hpb_enabled }}"
+      - name: "{{ nextcloud_talk_hpb_janus_identifier }}.service"
+        priority: 2002
+        restart_necessary: "{{ nextcloud_talk_hpb_restart_necessary | bool }}"
+        groups: [mash, nextcloud-talk-hpb]
+        when: "{{ nextcloud_talk_hpb_enabled }}"
+```
+
+No `setup` entry is needed: the component runs the role at the default priority,
+after `nextcloud` (same priority, sorted by component name).
+
+`inventory/components/nextcloud_talk_hpb/wiring.yml`:
 
 ```yaml
 nextcloud_talk_hpb_enabled: false
@@ -80,37 +117,49 @@ nextcloud_talk_hpb_identifier: "{{ mash_playbook_service_identifier_prefix }}nex
 nextcloud_talk_hpb_base_path: "{{ mash_playbook_base_path }}/{{ mash_playbook_service_base_directory_name_prefix }}nextcloud-talk-hpb"
 nextcloud_talk_hpb_uid: "{{ mash_playbook_uid }}"
 nextcloud_talk_hpb_gid: "{{ mash_playbook_gid }}"
-nextcloud_talk_hpb_nextcloud_url: "{{ nextcloud_scheme }}://{{ nextcloud_hostname }}{{ nextcloud_path_prefix }}"
 # 64 bytes (sha256 hex) keeps the signaling hash key inside its recommended 32/64-byte range;
 # the block key must be 16, 24 or 32 bytes or the signaling server refuses to start.
 nextcloud_talk_hpb_signaling_hash_key: "{{ (mash_playbook_generic_secret_key + ':nextcloud-talk-hpb.hash') | hash('sha256') }}"
 nextcloud_talk_hpb_signaling_block_key: "{{ ((mash_playbook_generic_secret_key + ':nextcloud-talk-hpb.block') | hash('sha256'))[:32] }}"
 nextcloud_talk_hpb_signaling_internal_shared_secret_key: "{{ (mash_playbook_generic_secret_key + ':nextcloud-talk-hpb.internal') | hash('sha512') }}"
 nextcloud_talk_hpb_nats_token: "{{ (mash_playbook_generic_secret_key + ':nextcloud-talk-hpb.nats') | hash('sha512') }}"
-nextcloud_talk_hpb_proxy_network: proxy
-nextcloud_talk_hpb_signaling_container_labels_traefik_enabled: "{{ traefik_enabled | default(false) }}"
-nextcloud_talk_hpb_signaling_container_labels_traefik_docker_network: "{{ nextcloud_talk_hpb_proxy_network }}"
-traefik_container_additional_networks_custom:
-  - "{{ nextcloud_talk_hpb_proxy_network }}"
+nextcloud_talk_hpb_proxy_network: "{{ mash_playbook_reverse_proxyable_services_additional_network }}"
 ```
 
-and add the three units to
-`mash_playbook_devture_systemd_service_manager_services_list_auto_itemized`:
+`inventory/components/nextcloud_talk_hpb/with/nextcloud.yml` derives the Nextcloud
+base URL while the Nextcloud component is in use:
 
 ```yaml
-  # role-specific:nextcloud_talk_hpb
-  - |-
-    {{ ({'name': (nextcloud_talk_hpb_nats_identifier + '.service'), 'priority': 2000, 'restart_necessary': (nextcloud_talk_hpb_restart_necessary | bool), 'groups': ['mash', 'nextcloud-talk-hpb']} if nextcloud_talk_hpb_enabled else omit) }}
-  - |-
-    {{ ({'name': (nextcloud_talk_hpb_signaling_identifier + '.service'), 'priority': 2001, 'restart_necessary': (nextcloud_talk_hpb_restart_necessary | bool), 'groups': ['mash', 'nextcloud-talk-hpb']} if nextcloud_talk_hpb_enabled else omit) }}
-  - |-
-    {{ ({'name': (nextcloud_talk_hpb_janus_identifier + '.service'), 'priority': 2002, 'restart_necessary': (nextcloud_talk_hpb_restart_necessary | bool), 'groups': ['mash', 'nextcloud-talk-hpb']} if nextcloud_talk_hpb_enabled else omit) }}
-  # /role-specific:nextcloud_talk_hpb
+nextcloud_talk_hpb_nextcloud_url: "{{ nextcloud_scheme }}://{{ nextcloud_hostname }}{{ nextcloud_path_prefix }}"
 ```
 
-The operator then supplies `nextcloud_talk_hpb_hostname`, `nextcloud_talk_hpb_public_ip`,
-`nextcloud_talk_hpb_turn_static_auth_secret` and `nextcloud_talk_hpb_signaling_secret`,
-and sets `nextcloud_talk_hpb_enabled: true`.
+`inventory/components/nextcloud_talk_hpb/with/traefik.yml` follows the playbook's
+reverse-proxy settings while the Traefik component is in use:
+
+```yaml
+nextcloud_talk_hpb_signaling_container_labels_traefik_enabled: "{{ mash_playbook_traefik_labels_enabled }}"
+nextcloud_talk_hpb_signaling_container_labels_traefik_entrypoints: "{{ traefik_entrypoint_primary }}"
+nextcloud_talk_hpb_signaling_container_labels_traefik_tls_certResolver: "{{ traefik_certResolver_primary }}"
+```
+
+Then, in the inventory's `vars.yml`, set `nextcloud_talk_hpb_enabled: true`,
+`nextcloud_talk_hpb_hostname`, `nextcloud_talk_hpb_public_ip`,
+`nextcloud_talk_hpb_turn_static_auth_secret` and
+`nextcloud_talk_hpb_signaling_secret`, plus `nextcloud_talk_hpb_nextcloud_url` when
+the Nextcloud component is not in use. When the playbook uses no Traefik,
+`mash_playbook_reverse_proxyable_services_additional_network` is empty; set
+`nextcloud_talk_hpb_proxy_network` to the network your reverse proxy uses (the role
+rejects an empty or missing network). Install the service
+with `just install-service nextcloud-talk-hpb` (or
+`just setup-service nextcloud-talk-hpb` to run the uninstall path too);
+`nextcloud-talk-hpb` is the service name used by the component's `inject` entries
+and by the systemd service group.
+
+If you contribute the component to the playbook itself, its
+`components/nextcloud_talk_hpb/README.md` is the service page: keep it next to the
+wiring and link to the role's documentation
+(`roles/galaxy/nextcloud_talk_hpb/docs/configuring-nextcloud-talk-hpb.md`) instead
+of duplicating it.
 
 See [`docs/configuring-nextcloud-talk-hpb.md`](docs/configuring-nextcloud-talk-hpb.md)
 for the required variables, image overrides, the Traefik/coturn/Nextcloud contract and
@@ -118,13 +167,13 @@ the post-deployment steps.
 
 ## Networks
 
-The role owns only its internal networks; the proxy network is the operator's.
+The role owns only its internal networks; the proxy network is external to it.
 
 | Network | Type | Default | Purpose |
 | --- | --- | --- | --- |
 | `nextcloud-talk-hpb-hpb` | internal bridge, `172.28.0.0/24` | created by the role | signaling ↔ NATS, no host route |
 | `nextcloud-talk-hpb-egress` | bridge, `172.29.0.0/24`, gateway `172.29.0.1` | created by the role | signaling ↔ host-networking Janus |
-| `proxy` | external | created by the operator | Traefik → signaling |
+| `proxy` | external | not created by this role | Traefik → signaling |
 
 ## Ports
 
