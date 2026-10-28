@@ -109,8 +109,23 @@ pass "signaling answers on the loopback HTTP API"
 
 # --- 4. graceful shutdown ----------------------------------------------------
 docker stop "$container" >/dev/null
-docker logs "$container" 2>&1 | grep -q 'Received SIGUSR1' \
-    || fail "signaling did not log 'Received SIGUSR1' on docker stop"
+# docker stop returns when the process exits, which can be before the log
+# copier has flushed the shutdown line; give it a bounded moment to appear.
+shutdown_log=""
+for _ in $(seq 1 10); do
+    shutdown_log=$(docker logs "$container" 2>&1 || true)
+    case "$shutdown_log" in
+        *'Received SIGUSR1'*) break ;;
+    esac
+    sleep 1
+done
+case "$shutdown_log" in
+    *'Received SIGUSR1'*) ;;
+    *)
+        printf '%s\n' "$shutdown_log" >&2
+        fail "signaling did not log 'Received SIGUSR1' on docker stop"
+        ;;
+esac
 pass "docker stop delivers SIGUSR1 and the server shuts down"
 
 echo "== smoke test passed"
